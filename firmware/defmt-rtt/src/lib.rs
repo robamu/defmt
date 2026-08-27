@@ -43,6 +43,7 @@
 
 mod channel;
 mod consts;
+pub mod instrumentation;
 
 use core::{
     cell::UnsafeCell,
@@ -127,6 +128,8 @@ struct RttEncoder {
     cs_restore: UnsafeCell<critical_section::RestoreState>,
     /// A defmt::Encoder for encoding frames
     encoder: UnsafeCell<defmt::Encoder>,
+    /// Bytes written to RTT for the frame currently being encoded
+    frame_len: UnsafeCell<usize>,
 }
 
 impl RttEncoder {
@@ -136,6 +139,7 @@ impl RttEncoder {
             taken: AtomicBool::new(false),
             cs_restore: UnsafeCell::new(critical_section::RestoreState::invalid()),
             encoder: UnsafeCell::new(defmt::Encoder::new()),
+            frame_len: UnsafeCell::new(0),
         }
     }
 
@@ -157,8 +161,11 @@ impl RttEncoder {
         // section.
         unsafe {
             self.cs_restore.get().write(restore);
+            self.frame_len.get().write(0);
             let encoder: &mut defmt::Encoder = &mut *self.encoder.get();
+            let frame_len = self.frame_len.get();
             encoder.start_frame(|b| {
+                *frame_len += b.len();
                 _SEGGER_RTT.up_channel.write_all(b);
             });
         }
@@ -174,7 +181,9 @@ impl RttEncoder {
         // section.
         unsafe {
             let encoder: &mut defmt::Encoder = &mut *self.encoder.get();
+            let frame_len = self.frame_len.get();
             encoder.write(bytes, |b| {
+                *frame_len += b.len();
                 _SEGGER_RTT.up_channel.write_all(b);
             });
         }
@@ -207,9 +216,12 @@ impl RttEncoder {
         // section.
         unsafe {
             let encoder: &mut defmt::Encoder = &mut *self.encoder.get();
+            let frame_len = self.frame_len.get();
             encoder.end_frame(|b| {
+                *frame_len += b.len();
                 _SEGGER_RTT.up_channel.write_all(b);
             });
+            instrumentation::record_frame_size(*frame_len);
             let restore = self.cs_restore.get().read();
             self.taken.store(false, Ordering::Relaxed);
             // paired with exactly one acquire call
